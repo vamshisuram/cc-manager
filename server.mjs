@@ -640,6 +640,73 @@ function lifecycleFromHooks(hooks) {
   }));
 }
 
+// ---------- Context budget ----------
+// Estimate what a fresh session pays in tokens before the first prompt:
+// CLAUDE.md contents, the memory index, and the name+description lines that
+// advertise every skill, slash command, and subagent. Heuristic: 1 token ≈ 4 chars.
+
+const estTokens = (s) => Math.ceil(String(s || '').length / 4);
+
+function loadContextBudget(plugins, commands, agents, skills, memory) {
+  const groups = [];
+
+  // CLAUDE.md + memory index — injected verbatim
+  const mdItems = [];
+  for (const src of memory.sources) {
+    if (src.exists && src.content) {
+      mdItems.push({ name: `CLAUDE.md (${src.scope})`, owner: src.scope, tokens: estTokens(src.content), source: src.path });
+    }
+  }
+  const memoryIndex = path.join(CLAUDE_DIR, 'projects', process.cwd().replace(/[\/.]/g, '-'), 'memory', 'MEMORY.md');
+  if (exists(memoryIndex)) {
+    mdItems.push({ name: 'Memory index (MEMORY.md)', owner: 'user', tokens: estTokens(readText(memoryIndex)), source: memoryIndex });
+  }
+  groups.push({ key: 'claude-md', label: 'CLAUDE.md & memory', desc: 'Injected verbatim into every session', items: mdItems });
+
+  // Descriptions advertised to the model each session
+  groups.push({
+    key: 'skills', label: 'Skill descriptions', desc: 'Every available skill is announced by name + description',
+    items: skills.map(s => ({ name: s.name, owner: s.plugin, tokens: estTokens(s.name + ': ' + s.desc) + 2 }))
+  });
+  groups.push({
+    key: 'commands', label: 'Slash command descriptions', desc: 'Every command is announced by name + description',
+    items: commands.map(c => ({ name: c.name, owner: c.plugin, tokens: estTokens(c.name + ': ' + c.desc) + 2 }))
+  });
+  groups.push({
+    key: 'agents', label: 'Subagent descriptions', desc: 'Every agent type is announced by name + description + tool list',
+    items: agents.map(a => ({ name: a.name, owner: a.plugin, tokens: estTokens(a.name + ': ' + a.desc + ' ' + (a.tools || []).join(', ')) + 2 }))
+  });
+
+  for (const g of groups) {
+    g.items.sort((a, b) => b.tokens - a.tokens);
+    g.tokens = g.items.reduce((s, i) => s + i.tokens, 0);
+  }
+
+  // Per-owner aggregation: what disabling a plugin would save
+  const perOwner = {};
+  for (const g of groups) {
+    for (const i of g.items) {
+      perOwner[i.owner] = (perOwner[i.owner] || 0) + i.tokens;
+    }
+  }
+  const enabledById = Object.fromEntries(plugins.map(p => [p.name, p.enabled]));
+  const perPlugin = Object.entries(perOwner)
+    .map(([owner, tokens]) => ({
+      owner,
+      tokens,
+      kind: plugins.some(p => p.name === owner) ? 'plugin' : 'config',
+      enabled: owner in enabledById ? enabledById[owner] : true
+    }))
+    .sort((a, b) => b.tokens - a.tokens);
+
+  return {
+    total: groups.reduce((s, g) => s + g.tokens, 0),
+    note: 'Estimates use ~4 characters per token. MCP tool schemas are not included — they depend on which servers connect and whether their tools are deferred.',
+    groups,
+    perPlugin
+  };
+}
+
 // ---------- Mutations: snapshots + plugin actions ----------
 
 const SNAPSHOT_ROOT = path.join(CLAUDE_DIR, 'cc-manager', 'snapshots');
@@ -761,15 +828,18 @@ function buildState() {
   const agents = loadAgents(plugins);
   buildCommandAgentLinks(commands, agents);
   const mcp = loadMcp();
+  const skills = loadSkills(plugins);
+  const memory = loadMemory();
   const state = {
     plugins,
     commands,
     agents,
-    skills: loadSkills(plugins),
+    skills,
     hooks,
     mcp,
     permissions: loadPermissions(),
-    memory: loadMemory(),
+    memory,
+    contextBudget: loadContextBudget(plugins, commands, agents, skills, memory),
     settings: loadSettings(),
     marketplaces: loadMarketplaces(plugins),
     sessions: loadSessions(),

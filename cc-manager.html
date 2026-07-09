@@ -756,6 +756,11 @@
         <span class="nav-text">Sessions</span>
         <span class="nav-count" data-count="sessions">·</span>
       </div>
+      <div class="nav-item" data-route="context">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
+        <span class="nav-text">Context budget</span>
+        <span class="nav-count" data-count="context">·</span>
+      </div>
       <div class="nav-item" data-route="marketplace">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l1-5h16l1 5"/><path d="M3 9v11h18V9"/><path d="M9 22V12h6v10"/></svg>
         <span class="nav-text">Marketplace</span>
@@ -957,7 +962,8 @@ const routes = {
   permissions: (root) => renderPermissions(root),
   settings:    (root) => renderSettings(root),
   sessions:    (root) => renderSessions(root),
-  marketplace: (root) => renderMarketplace(root)
+  marketplace: (root) => renderMarketplace(root),
+  context:     (root) => renderContextBudget(root)
 };
 
 const routeLabels = {
@@ -972,7 +978,8 @@ const routeLabels = {
   permissions: 'Permissions',
   settings: 'Settings',
   sessions: 'Sessions',
-  marketplace: 'Marketplace'
+  marketplace: 'Marketplace',
+  context: 'Context budget'
 };
 
 function navigate(route) {
@@ -2091,6 +2098,113 @@ function renderMarketplace(root) {
   paint('');
 }
 
+// ======================== CONTEXT BUDGET =========================
+
+const fmtTokens = (n) => n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n);
+const GROUP_TONES = ['purple', 'teal', 'info', 'warning', 'pink', 'success'];
+
+function renderContextBudget(root) {
+  const cb = data.contextBudget;
+  root.appendChild(el('div', { class: 'page-header' }, [
+    el('h1', { class: 'page-title' }, 'Context budget'),
+    el('p', { class: 'page-desc' }, 'What your setup costs in tokens at the start of every session, before you type a word. Trim what you don\'t use — it pays back on every conversation.')
+  ]));
+  if (!cb) { root.appendChild(el('div', { style: 'color:var(--text-3);' }, 'No budget data — refresh.')); return; }
+
+  const windowShare = (cb.total / 200000) * 100;
+  const heaviest = cb.perPlugin[0];
+  const strip = el('div', { class: 'stat-strip' });
+  [
+    { label: 'Per-session cost', value: '~' + fmtTokens(cb.total), meta: 'tokens before the first prompt' },
+    { label: 'Of a 200k window', value: windowShare.toFixed(1) + '%', meta: 'consumed by setup', fill: Math.min(1, windowShare / 100) },
+    { label: 'Heaviest source', value: heaviest ? heaviest.owner : '—', meta: heaviest ? `~${fmtTokens(heaviest.tokens)} tokens` : '' },
+    { label: 'Line items', value: cb.groups.reduce((s, g) => s + g.items.length, 0), meta: 'skills, commands, agents, files' }
+  ].forEach(s => {
+    const c = el('div', { class: 'stat' });
+    c.appendChild(el('div', { class: 'stat-label' }, s.label));
+    c.appendChild(el('div', { class: 'stat-value' }, String(s.value)));
+    c.appendChild(el('div', { class: 'stat-meta' }, s.meta));
+    if (s.fill !== undefined) {
+      const bar = el('div', { class: 'stat-bar' });
+      bar.appendChild(el('div', { class: 'stat-bar-fill', style: `width: ${s.fill * 100}%` }));
+      c.appendChild(bar);
+    }
+    strip.appendChild(c);
+  });
+  root.appendChild(strip);
+
+  // Stacked bar by category
+  const barSec = el('div', { class: 'section' });
+  barSec.appendChild(el('div', { class: 'section-header' }, [el('div', { class: 'section-title' }, 'Where it goes')]));
+  const stack = el('div', { style: 'display:flex; height:22px; border-radius:var(--radius); overflow:hidden; border:1px solid var(--border);' });
+  const legend = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap; margin-top:10px;' });
+  cb.groups.forEach((g, i) => {
+    if (!g.tokens) return;
+    const tone = GROUP_TONES[i % GROUP_TONES.length];
+    stack.appendChild(el('div', { style: `width:${(g.tokens / cb.total) * 100}%; background:var(--${tone}); min-width:2px;`, title: `${g.label}: ~${fmtTokens(g.tokens)} tokens` }));
+    legend.appendChild(el('div', { style: 'display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-2);' }, [
+      el('span', { style: `width:10px; height:10px; border-radius:3px; background:var(--${tone}); display:inline-block;` }),
+      `${g.label} · ~${fmtTokens(g.tokens)}`
+    ]));
+  });
+  barSec.appendChild(stack);
+  barSec.appendChild(legend);
+  root.appendChild(barSec);
+
+  // Per-plugin savings table
+  const maxOwner = Math.max(...cb.perPlugin.map(p => p.tokens), 1);
+  const ownerSec = el('div', { class: 'section' });
+  ownerSec.appendChild(el('div', { class: 'section-header' }, [
+    el('div', {}, [
+      el('div', { class: 'section-title' }, 'Cost by source'),
+      el('div', { style: 'font-size:11px; color:var(--text-3); margin-top:2px;' }, 'What disabling a plugin (Plugins tab) would save on every future session.')
+    ])
+  ]));
+  const ownerWrap = el('div', { class: 'table-wrap' });
+  cb.perPlugin.forEach(p => {
+    const row = el('div', { class: 'item-row', style: 'cursor:default; gap:12px;' });
+    const txt = el('div', { style: 'flex:1; min-width:0;' });
+    txt.appendChild(el('div', { class: 'item-name', style: 'font-family:var(--font-mono); font-size:12px;' }, p.owner + (p.enabled ? '' : ' (disabled)')));
+    const bar = el('div', { style: 'height:6px; background:var(--surface-2); border-radius:3px; margin-top:6px; overflow:hidden; max-width:420px;' });
+    bar.appendChild(el('div', { style: `height:100%; width:${(p.tokens / maxOwner) * 100}%; background:var(--${p.kind === 'plugin' ? 'purple' : 'teal'}); border-radius:3px;` }));
+    txt.appendChild(bar);
+    row.appendChild(txt);
+    row.appendChild(el('span', { class: 'pill' }, p.kind));
+    row.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:12px; min-width:56px; text-align:right;' }, '~' + fmtTokens(p.tokens)));
+    ownerWrap.appendChild(row);
+  });
+  ownerSec.appendChild(ownerWrap);
+  root.appendChild(ownerSec);
+
+  // Per-category detail
+  cb.groups.forEach(g => {
+    if (!g.items.length) return;
+    const sec = el('div', { class: 'section' });
+    sec.appendChild(el('div', { class: 'section-header' }, [
+      el('div', {}, [
+        el('div', { class: 'section-title' }, g.label),
+        el('div', { style: 'font-size:11px; color:var(--text-3); margin-top:2px;' }, g.desc)
+      ]),
+      el('span', { class: 'pill' }, `~${fmtTokens(g.tokens)} tokens`)
+    ]));
+    const wrap = el('div', { class: 'table-wrap' });
+    g.items.slice(0, 12).forEach(i => {
+      const row = el('div', { class: 'item-row', style: 'cursor:default; gap:12px;' });
+      row.appendChild(el('div', { style: 'flex:1; min-width:0; font-family:var(--font-mono); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;' }, i.name));
+      row.appendChild(el('span', { class: 'pill' }, i.owner));
+      row.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:12px; min-width:56px; text-align:right;' }, '~' + fmtTokens(i.tokens)));
+      wrap.appendChild(row);
+    });
+    if (g.items.length > 12) {
+      wrap.appendChild(el('div', { style: 'padding:8px 16px; font-size:11px; color:var(--text-3);' }, `+ ${g.items.length - 12} more · ~${fmtTokens(g.items.slice(12).reduce((s, i) => s + i.tokens, 0))} tokens`));
+    }
+    sec.appendChild(wrap);
+    root.appendChild(sec);
+  });
+
+  root.appendChild(el('div', { style: 'font-size:11px; color:var(--text-3); padding:4px 2px 16px;' }, cb.note));
+}
+
 // Update sidebar counts from real data
 function updateNavCounts() {
   const counts = {
@@ -2101,7 +2215,8 @@ function updateNavCounts() {
     hooks: data.hooks?.length || 0,
     mcp: data.mcp?.length || 0,
     sessions: data.sessions?.totalSessions || 0,
-    marketplace: (data.marketplaces || []).reduce((s, m) => s + m.pluginCount, 0)
+    marketplace: (data.marketplaces || []).reduce((s, m) => s + m.pluginCount, 0),
+    context: data.contextBudget ? '~' + fmtTokens(data.contextBudget.total) : '·'
   };
   document.querySelectorAll('[data-count]').forEach(node => {
     const k = node.getAttribute('data-count');

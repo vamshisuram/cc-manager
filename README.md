@@ -43,10 +43,14 @@ Web is read-optimized. Visual layouts. Hover for detail. Click to drill in. Sear
 - Sessions tab — total sessions, total messages, most-active projects, recent context across every project in `~/.claude/projects`
 - Global search — type once, find any command, agent, hook, plugin, permission, marketplace plugin, anywhere
 
-**Control** (new in 0.2)
+**Control**
 - Enable / disable any plugin with the toggle on its card — applies to new sessions
 - One-click install from the marketplace tab; uninstall with a two-click confirm
+- Permissions editor — add, delete, and move rules between allow / ask / deny in any scope, without hand-editing settings.json
 - Every change is preceded by an automatic config snapshot — restore any snapshot from the Settings tab (restores are themselves snapshotted, so undo is undoable)
+
+**Cost awareness**
+- Context budget tab — what your setup costs in tokens at the start of every session: CLAUDE.md, memory index, and every skill / command / agent description, stacked by category and aggregated per plugin so you know exactly what disabling something saves
 
 **Quality of life**
 - Click a file path in any drawer to open it in your editor or reveal in Finder
@@ -107,10 +111,8 @@ Everything is read straight from disk. No telemetry. No analytics. No network ca
 
 ## Roadmap
 
-The goal is to be the spanner for the robot — the single place where you understand *and* tune your Claude Code. 0.2 added the first mutations (plugin toggles, marketplace install/uninstall, snapshot/undo). Coming next:
+The goal is to be the spanner for the robot — the single place where you understand *and* tune your Claude Code. 0.2 added the first mutations (plugin toggles, marketplace install/uninstall, snapshot/undo). 0.3 added the permissions editor and the context budget tab — what your setup costs in tokens at the start of every session, broken down by plugin so you know exactly what disabling something saves. Coming next:
 
-- Permissions editor — move rules between allow / deny / ask across scopes
-- Context budget visualizer — what your setup costs in tokens per session
 - Session detail drill-in with token cost and tool-call breakdown
 - Hook manager — enable/disable, test-fire with sample payloads, execution log
 - MCP server manager — add / edit / connect-test, tool inspection
