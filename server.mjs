@@ -63,23 +63,30 @@ function pluginContents(installPath) {
     readJSON(path.join(installPath, 'plugin.json')) ||
     readJSON(path.join(installPath, '.claude-plugin', 'plugin.json')) ||
     {};
+  // Manifest commands/agents can be a directory path (string) or an explicit
+  // list of files (array) — e.g. the vercel plugin lists each .md file.
   const commandsDir =
-    (manifest.commands && path.join(installPath, manifest.commands)) ||
+    (typeof manifest.commands === 'string' && path.join(installPath, manifest.commands)) ||
     path.join(installPath, 'commands');
   const agentsDir =
-    (manifest.agents && path.join(installPath, manifest.agents)) ||
+    (typeof manifest.agents === 'string' && path.join(installPath, manifest.agents)) ||
     path.join(installPath, 'agents');
   const skillsDir = path.join(installPath, 'skills');
 
   // commands: count .md in commands dir (recursive 1 level)
-  let commands = countMarkdownIn(commandsDir);
-  for (const d of listDir(commandsDir)) {
-    const sub = path.join(commandsDir, d);
-    try {
-      if (fs.statSync(sub).isDirectory()) commands += countMarkdownIn(sub);
-    } catch {}
+  let commands;
+  if (Array.isArray(manifest.commands)) {
+    commands = manifest.commands.length;
+  } else {
+    commands = countMarkdownIn(commandsDir);
+    for (const d of listDir(commandsDir)) {
+      const sub = path.join(commandsDir, d);
+      try {
+        if (fs.statSync(sub).isDirectory()) commands += countMarkdownIn(sub);
+      } catch {}
+    }
   }
-  const agents = countMarkdownIn(agentsDir);
+  const agents = Array.isArray(manifest.agents) ? manifest.agents.length : countMarkdownIn(agentsDir);
 
   // hooks
   let hooks = 0;
@@ -103,9 +110,23 @@ function pluginContents(installPath) {
   return { commands, agents, hooks, mcp, skills, manifest };
 }
 
+// Merged enabledPlugins map across settings scopes (later scopes win).
+// A plugin absent from the map is enabled by default; explicit false disables.
+function loadEnabledPlugins() {
+  const merged = {};
+  const sources = [
+    path.join(CLAUDE_DIR, 'settings.json'),
+    path.join(process.cwd(), '.claude', 'settings.json'),
+    path.join(process.cwd(), '.claude', 'settings.local.json')
+  ];
+  for (const p of sources) Object.assign(merged, readJSON(p)?.enabledPlugins || {});
+  return merged;
+}
+
 function loadPlugins() {
   const installed = readJSON(path.join(CLAUDE_DIR, 'plugins', 'installed_plugins.json'));
   if (!installed?.plugins) return [];
+  const enabledMap = loadEnabledPlugins();
   const out = [];
   for (const [key, entries] of Object.entries(installed.plugins)) {
     for (const e of (Array.isArray(entries) ? entries : [entries])) {
@@ -120,7 +141,8 @@ function loadPlugins() {
         version: e.version,
         scope: e.scope,
         installPath: e.installPath,
-        enabled: true,
+        enabled: enabledMap[key] !== false,
+        manifest: contents.manifest || null,
         commands: contents.commands,
         agents: contents.agents,
         hooks: contents.hooks,
@@ -527,6 +549,119 @@ function lifecycleFromHooks(hooks) {
   }));
 }
 
+// ---------- Mutations: snapshots + plugin actions ----------
+
+const SNAPSHOT_ROOT = path.join(CLAUDE_DIR, 'cc-manager', 'snapshots');
+const SNAPSHOT_KEEP = 40;
+
+// Files a plugin mutation can touch. Snapshot all of them before any write.
+function mutationTargets() {
+  return [
+    path.join(CLAUDE_DIR, 'settings.json'),
+    path.join(CLAUDE_DIR, 'plugins', 'installed_plugins.json'),
+    path.join(CLAUDE_DIR, 'plugins', 'config.json'),
+    path.join(process.cwd(), '.claude', 'settings.json'),
+    path.join(process.cwd(), '.claude', 'settings.local.json')
+  ];
+}
+
+function takeSnapshot(action, files = mutationTargets()) {
+  const id = new Date().toISOString().replace(/[:.]/g, '-') + '__' + action.replace(/[^A-Za-z0-9_-]/g, '_');
+  const dir = path.join(SNAPSHOT_ROOT, id);
+  fs.mkdirSync(dir, { recursive: true });
+  const manifest = { id, action, createdAt: new Date().toISOString(), files: [] };
+  files.forEach((original, i) => {
+    const existed = exists(original);
+    const stored = `${i}__${path.basename(original)}`;
+    if (existed) fs.copyFileSync(original, path.join(dir, stored));
+    manifest.files.push({ original, stored, existed });
+  });
+  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+  pruneSnapshots();
+  return manifest;
+}
+
+function pruneSnapshots() {
+  const dirs = listDir(SNAPSHOT_ROOT).sort().reverse();
+  for (const d of dirs.slice(SNAPSHOT_KEEP)) {
+    try { fs.rmSync(path.join(SNAPSHOT_ROOT, d), { recursive: true, force: true }); } catch {}
+  }
+}
+
+function listSnapshots() {
+  return listDir(SNAPSHOT_ROOT)
+    .sort().reverse()
+    .map(d => readJSON(path.join(SNAPSHOT_ROOT, d, 'manifest.json')))
+    .filter(Boolean)
+    .map(m => ({
+      id: m.id,
+      action: m.action,
+      createdAt: m.createdAt,
+      fileCount: m.files.filter(f => f.existed).length
+    }));
+}
+
+function restoreSnapshot(id) {
+  if (!/^[A-Za-z0-9_.-]+$/.test(id)) throw new Error('invalid snapshot id');
+  const dir = path.join(SNAPSHOT_ROOT, id);
+  const manifest = readJSON(path.join(dir, 'manifest.json'));
+  if (!manifest) throw new Error('snapshot not found');
+  // Snapshot the current state first so a restore is itself undoable
+  takeSnapshot('pre-restore', manifest.files.map(f => f.original));
+  const restored = [];
+  const skipped = [];
+  for (const f of manifest.files) {
+    if (f.existed) {
+      fs.mkdirSync(path.dirname(f.original), { recursive: true });
+      fs.copyFileSync(path.join(dir, f.stored), f.original);
+      restored.push(f.original);
+    } else if (exists(f.original)) {
+      // File didn't exist at snapshot time but does now — leave it, just report
+      skipped.push(f.original);
+    }
+  }
+  return { restored, skipped };
+}
+
+const PLUGIN_ACTIONS = new Set(['enable', 'disable', 'install', 'uninstall', 'update']);
+
+function runClaudePlugin(action, plugin, scope) {
+  return import('node:child_process').then(({ spawn }) => new Promise((resolve) => {
+    const args = ['plugin', action, plugin];
+    if (scope && action !== 'update') args.push('--scope', scope);
+    const child = spawn('claude', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch {}
+      resolve({ ok: false, error: `timed out after 120s`, stdout, stderr });
+    }, 120000);
+    child.stdout.on('data', d => stdout += d);
+    child.stderr.on('data', d => stderr += d);
+    child.on('error', e => {
+      clearTimeout(timer);
+      resolve({ ok: false, error: e.code === 'ENOENT' ? 'claude CLI not found on PATH' : String(e), stdout, stderr });
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, code, stdout: stdout.trim(), stderr: stderr.trim() });
+    });
+  }));
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let buf = '';
+    req.on('data', d => {
+      buf += d;
+      if (buf.length > 65536) { reject(new Error('body too large')); req.destroy(); }
+    });
+    req.on('end', () => {
+      try { resolve(buf ? JSON.parse(buf) : {}); } catch (e) { reject(new Error('invalid JSON body')); }
+    });
+    req.on('error', reject);
+  });
+}
+
 function buildState() {
   const plugins = loadPlugins();
   const rawHooks = loadHooks(plugins);
@@ -547,6 +682,7 @@ function buildState() {
     settings: loadSettings(),
     marketplaces: loadMarketplaces(plugins),
     sessions: loadSessions(),
+    snapshots: listSnapshots(),
     lifecycleEvents: lifecycleFromHooks(hooks),
     meta: {
       generatedAt: new Date().toISOString(),
@@ -578,6 +714,38 @@ const server = http.createServer((req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: String(e) }));
     }
+    return;
+  }
+  if (u.pathname === '/api/plugin' && req.method === 'POST') {
+    readBody(req).then(async body => {
+      const { action, plugin, scope } = body || {};
+      if (!PLUGIN_ACTIONS.has(action)) throw new Error(`action must be one of: ${[...PLUGIN_ACTIONS].join(', ')}`);
+      if (typeof plugin !== 'string' || !/^[A-Za-z0-9@._\/-]{1,200}$/.test(plugin)) throw new Error('invalid plugin name');
+      if (scope !== undefined && !['user', 'project', 'local'].includes(scope)) throw new Error('invalid scope');
+      const snapshot = takeSnapshot(`${action}-${plugin}`);
+      const result = await runClaudePlugin(action, plugin, scope);
+      res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ...result, error: result.ok ? undefined : (result.error || result.stderr || result.stdout || `exit code ${result.code}`), snapshotId: snapshot.id }));
+    }).catch(e => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String(e.message || e) }));
+    });
+    return;
+  }
+  if (u.pathname === '/api/snapshots' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ snapshots: listSnapshots() }));
+    return;
+  }
+  if (u.pathname === '/api/snapshots/restore' && req.method === 'POST') {
+    readBody(req).then(body => {
+      const result = restoreSnapshot(String(body?.id || ''));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, ...result }));
+    }).catch(e => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String(e.message || e) }));
+    });
     return;
   }
   if (u.pathname === '/api/script') {

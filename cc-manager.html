@@ -1025,6 +1025,40 @@ function closeDrawer() {
   drawerBackdrop.classList.remove('open');
 }
 
+// ======================== MUTATIONS: toast + API helpers =========================
+
+const toastWrap = document.createElement('div');
+toastWrap.style.cssText = 'position:fixed; bottom:20px; right:20px; display:flex; flex-direction:column; gap:8px; z-index:2000; max-width:380px;';
+document.body.appendChild(toastWrap);
+
+function toast(msg, tone = 'info') {
+  const colors = { success: 'var(--success)', error: 'var(--pink)', info: 'var(--info)' };
+  const t = document.createElement('div');
+  t.style.cssText = `background:var(--surface); border:1px solid var(--border-strong); border-left:3px solid ${colors[tone] || colors.info}; border-radius:var(--radius); padding:10px 14px; font-size:13px; color:var(--text); box-shadow:0 4px 16px rgba(0,0,0,0.15); transition:opacity 0.3s;`;
+  t.textContent = msg;
+  toastWrap.appendChild(t);
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 350); }, tone === 'error' ? 8000 : 5000);
+}
+
+async function apiPost(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+
+function refreshState() {
+  return fetch('/api/state')
+    .then(r => r.json())
+    .then(real => {
+      data = Object.assign({}, data, real);
+      updateNavCounts();
+      const route = (document.querySelector('.nav-item.active') || {}).dataset?.route || 'overview';
+      navigate(route);
+    })
+    .catch(() => {});
+}
+
 // ======================== RENDERERS =========================
 
 function renderOverview(root) {
@@ -1119,10 +1153,23 @@ function renderPluginCard(p) {
   titleWrap.appendChild(el('div', { class: 'card-title' }, p.name));
   titleWrap.appendChild(el('div', { class: 'card-source' }, p.source));
   head.appendChild(titleWrap);
-  const tog = el('div', { class: `toggle ${p.enabled ? 'on' : ''}`, onclick: e => {
+  const tog = el('div', { class: `toggle ${p.enabled ? 'on' : ''}`, title: p.enabled ? 'Disable plugin' : 'Enable plugin', onclick: async e => {
     e.stopPropagation();
-    p.enabled = !p.enabled;
-    tog.classList.toggle('on', p.enabled);
+    if (tog.dataset.busy) return;
+    tog.dataset.busy = '1';
+    tog.style.opacity = '0.4';
+    const action = p.enabled ? 'disable' : 'enable';
+    try {
+      await apiPost('/api/plugin', { action, plugin: p.id });
+      p.enabled = !p.enabled;
+      tog.classList.toggle('on', p.enabled);
+      toast(`${p.name} ${action}d — applies to new sessions. Snapshot saved.`, 'success');
+    } catch (err) {
+      toast(`Could not ${action} ${p.name}: ${err.message}`, 'error');
+    } finally {
+      delete tog.dataset.busy;
+      tog.style.opacity = '';
+    }
   }});
   head.appendChild(tog);
   card.appendChild(head);
@@ -1179,18 +1226,11 @@ function openPluginDrawer(p) {
     </div>
     <div class="drawer-section">
       <div class="drawer-section-label">Plugin manifest</div>
-      <div class="code-block">{
-  "name": "${p.name}",
-  "version": "1.4.0",
-  "commands": "./commands",
-  "agents": "./agents",
-  "hooks": "./hooks/hooks.json",
-  "mcpServers": "./.mcp.json"
-}</div>
+      <div class="code-block">${escHtml(p.manifest && Object.keys(p.manifest).length ? JSON.stringify(p.manifest, null, 2) : '(no manifest found)')}</div>
     </div>
     <div class="drawer-section">
       <div class="drawer-section-label">Status</div>
-      <div class="drawer-section-body">${p.enabled ? '<span class="pulse"></span> Enabled in this project' : 'Disabled — toggle on to load on next session'}</div>
+      <div class="drawer-section-body">${p.enabled ? '<span class="pulse"></span> Enabled' : 'Disabled — toggle on to load in new sessions'}${p.version ? ` · version <span style="font-family:var(--font-mono)">${escHtml(p.version)}</span>` : ''}${p.scope ? ` · ${escHtml(p.scope)} scope` : ''}</div>
     </div>`;
   openDrawer(head, body);
 }
@@ -1545,7 +1585,52 @@ renderSettings = function(root) {
     }
     root.appendChild(sec);
   });
+  renderSnapshotsSection(root);
 };
+
+// Snapshots panel — every mutation cc-manager makes is preceded by a config
+// snapshot; restoring one is itself snapshotted, so restores are undoable too.
+function renderSnapshotsSection(root) {
+  const snaps = data.snapshots || [];
+  const sec = el('div', { class: 'section' });
+  sec.appendChild(el('div', { class: 'section-header' }, [
+    el('div', {}, [
+      el('div', { class: 'section-title' }, 'Config snapshots'),
+      el('div', { style: 'font-size:11px; color:var(--text-3); margin-top:2px;' }, 'Taken automatically before every change made from this UI. Restore rolls config files back.')
+    ]),
+    el('span', { class: 'pill' }, `${snaps.length} snapshot${snaps.length === 1 ? '' : 's'}`)
+  ]));
+  if (!snaps.length) {
+    sec.appendChild(el('div', { style: 'padding: 14px 20px; color: var(--text-3); font-size: 13px;' }, 'No snapshots yet. One is created the first time you toggle, install, or uninstall a plugin.'));
+  } else {
+    const wrap = el('div', { class: 'table-wrap' });
+    snaps.slice(0, 15).forEach(s => {
+      const row = el('div', { class: 'item-row', style: 'cursor:default;' });
+      const txt = el('div', { style: 'flex:1; min-width:0;' });
+      txt.appendChild(el('div', { class: 'item-name', style: 'font-family:var(--font-mono); font-size:12px;' }, s.action));
+      txt.appendChild(el('div', { class: 'item-desc' }, `${new Date(s.createdAt).toLocaleString()} · ${s.fileCount} file${s.fileCount === 1 ? '' : 's'}`));
+      row.appendChild(txt);
+      const btn = el('span', { class: 'pill info', style: 'cursor:pointer;', onclick: async () => {
+        if (btn.dataset.busy) return;
+        btn.dataset.busy = '1';
+        btn.textContent = 'restoring…';
+        try {
+          const r = await apiPost('/api/snapshots/restore', { id: s.id });
+          toast(`Restored ${r.restored.length} file${r.restored.length === 1 ? '' : 's'} from snapshot. Applies to new sessions.`, 'success');
+          refreshState();
+        } catch (err) {
+          toast(`Restore failed: ${err.message}`, 'error');
+          btn.textContent = 'restore';
+          delete btn.dataset.busy;
+        }
+      }}, 'restore');
+      row.appendChild(btn);
+      wrap.appendChild(row);
+    });
+    sec.appendChild(wrap);
+  }
+  root.appendChild(sec);
+}
 
 // Override hooks renderer: add health badge + click to open drawer with script preview
 renderHooks = function(root) {
@@ -1883,6 +1968,50 @@ function renderMarketplace(root) {
         card.appendChild(head);
         card.appendChild(el('div', { class: 'card-desc' }, p.description));
         const foot = el('div', { class: 'card-foot' });
+        const pluginId = `${p.name}@${mk.name}`;
+        if (!p.installed) {
+          const btn = el('span', { class: 'pill info', style: 'cursor:pointer;', onclick: async () => {
+            if (btn.dataset.busy) return;
+            btn.dataset.busy = '1';
+            btn.textContent = 'installing…';
+            try {
+              await apiPost('/api/plugin', { action: 'install', plugin: pluginId });
+              toast(`${p.name} installed — available in new sessions. Snapshot saved.`, 'success');
+              refreshState();
+            } catch (err) {
+              toast(`Install failed for ${p.name}: ${err.message}`, 'error');
+              btn.textContent = 'install';
+              delete btn.dataset.busy;
+            }
+          }}, 'install');
+          foot.appendChild(btn);
+        } else {
+          // Two-click uninstall: first click arms it, second click executes
+          const btn = el('span', { class: 'pill', style: 'cursor:pointer;', onclick: async () => {
+            if (btn.dataset.busy) return;
+            if (!btn.dataset.armed) {
+              btn.dataset.armed = '1';
+              btn.className = 'pill pink';
+              btn.textContent = 'confirm uninstall?';
+              setTimeout(() => { if (!btn.dataset.busy) { delete btn.dataset.armed; btn.className = 'pill'; btn.textContent = 'uninstall'; } }, 4000);
+              return;
+            }
+            btn.dataset.busy = '1';
+            btn.textContent = 'uninstalling…';
+            try {
+              await apiPost('/api/plugin', { action: 'uninstall', plugin: pluginId });
+              toast(`${p.name} uninstalled. Snapshot saved — restore it from Settings if needed.`, 'success');
+              refreshState();
+            } catch (err) {
+              toast(`Uninstall failed for ${p.name}: ${err.message}`, 'error');
+              delete btn.dataset.busy;
+              delete btn.dataset.armed;
+              btn.className = 'pill';
+              btn.textContent = 'uninstall';
+            }
+          }}, 'uninstall');
+          foot.appendChild(btn);
+        }
         if (p.category) foot.appendChild(el('span', { class: 'pill' }, p.category));
         if (p.homepage) {
           const a = el('a', { href: p.homepage, target: '_blank', class: 'pill', style: 'text-decoration:none;' }, 'homepage');
