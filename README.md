@@ -89,6 +89,8 @@ The goal is to be the spanner for the robot — the single place where you under
 - Settings diff and conflict resolver across the three sources
 - Full setup export / profiles ("work", "personal", "minimal")
 
+Detailed working notes per item: [docs/roadmap.md](docs/roadmap.md)
+
 PRs welcome. Issues even more welcome.
 
 ---
