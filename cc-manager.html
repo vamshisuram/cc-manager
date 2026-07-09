@@ -1488,31 +1488,93 @@ function renderMemory(root) {
   root.appendChild(wrap);
 }
 
+const PERM_TONES = { allow: 'success', deny: 'pink', ask: 'warning' };
+const PERM_LISTS = ['allow', 'ask', 'deny'];
+
+function permApi(body, successMsg) {
+  return apiPost('/api/permissions', body)
+    .then(() => {
+      toast(`${successMsg} — applies to new sessions. Snapshot saved.`, 'success');
+      return refreshState();
+    })
+    .catch(err => { toast(err.message, 'error'); throw err; });
+}
+
 function renderPermissions(root) {
   root.appendChild(el('div', { class: 'page-header' }, [
     el('h1', { class: 'page-title' }, 'Permissions'),
-    el('p', { class: 'page-desc' }, 'Allow, deny, and ask rules that gate every tool call.')
+    el('p', { class: 'page-desc' }, 'Allow, deny, and ask rules that gate every tool call. Edit here instead of hand-editing settings.json — every change is snapshotted.')
   ]));
-  const sections = [
-    { title: 'Always allow', tone: 'success', rules: ['Read(**)', 'Grep(**)', 'Glob(**)', 'Bash(git status)', 'Bash(git diff *)', 'Bash(pnpm test*)'] },
-    { title: 'Always deny', tone: 'pink', rules: ['Bash(rm -rf *)', 'Bash(git push --force*)', 'Write(.env*)', 'Edit(.env*)'] },
-    { title: 'Ask first', tone: 'warning', rules: ['Bash(git push *)', 'Bash(pnpm publish*)', 'Write(/etc/**)'] }
-  ];
-  sections.forEach(s => {
+
+  const perms = data.permissions || {};
+  const sources = perms.sources || [];
+
+  // ---- Add-rule bar ----
+  const selStyle = 'background:var(--surface); color:var(--text); border:1px solid var(--border-strong); border-radius:var(--radius); padding:8px 10px; font-size:13px;';
+  const bar = el('div', { style: 'display:flex; gap:8px; margin-bottom:16px; align-items:center; flex-wrap:wrap;' });
+  const input = el('input', { class: 'search', placeholder: 'e.g. Bash(git status), Read(**), WebFetch(domain:docs.foo.com)', style: 'flex:1; min-width:280px; font-family:var(--font-mono);' });
+  const listSel = el('select', { style: selStyle });
+  PERM_LISTS.forEach(l => listSel.appendChild(el('option', { value: l }, l)));
+  const scopeSel = el('select', { style: selStyle });
+  sources.forEach(s => scopeSel.appendChild(el('option', { value: s.scope }, `${s.scope} scope`)));
+  const addBtn = el('span', { class: 'pill info', style: 'cursor:pointer; padding:8px 14px;', onclick: async () => {
+    const rule = input.value.trim();
+    if (!rule) { toast('Enter a rule first', 'error'); return; }
+    await permApi({ op: 'add', rule, list: listSel.value, scope: scopeSel.value }, `Added to ${listSel.value} (${scopeSel.value})`).catch(() => {});
+  }}, 'add rule');
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') addBtn.click(); });
+  bar.appendChild(input); bar.appendChild(listSel); bar.appendChild(scopeSel); bar.appendChild(addBtn);
+  root.appendChild(bar);
+
+  // ---- Rules per scope ----
+  sources.forEach(src => {
+    const total = PERM_LISTS.reduce((n, l) => n + src[l].length, 0);
     const sec = el('div', { class: 'section' });
     sec.appendChild(el('div', { class: 'section-header' }, [
-      el('div', { class: 'section-title' }, s.title)
+      el('div', {}, [
+        el('div', { class: 'section-title' }, `${src.scope} scope`),
+        el('div', { style: 'font-size:11px; color:var(--text-3); margin-top:2px; font-family:var(--font-mono);' }, src.path)
+      ]),
+      el('span', { class: 'pill' }, `${total} rule${total === 1 ? '' : 's'}`)
     ]));
-    const wrap = el('div', { class: 'table-wrap', style: 'padding: 12px;' });
-    s.rules.forEach(r => {
-      wrap.appendChild(el('div', { style: 'padding: 8px 12px; font-family:var(--font-mono); font-size:12px;' }, [
-        el('span', { class: `pill ${s.tone}`, style: 'margin-right: 10px;' }, s.title.split(' ')[0].toLowerCase()),
-        r
-      ]));
-    });
-    sec.appendChild(wrap);
+    if (!total) {
+      sec.appendChild(el('div', { style: 'padding: 12px 16px; color: var(--text-3); font-size: 13px;' }, src.exists ? 'No permission rules in this file.' : 'No file at this path — adding a rule here creates it.'));
+    } else {
+      const wrap = el('div', { class: 'table-wrap' });
+      PERM_LISTS.forEach(list => {
+        src[list].forEach(rule => wrap.appendChild(permRuleRow(src.scope, list, rule)));
+      });
+      sec.appendChild(wrap);
+    }
     root.appendChild(sec);
   });
+}
+
+function permRuleRow(scope, list, rule) {
+  const row = el('div', { class: 'item-row', style: 'cursor:default; gap:10px;' });
+  row.appendChild(el('span', { class: `pill ${PERM_TONES[list]}`, style: 'min-width:44px; text-align:center;' }, list));
+  row.appendChild(el('div', { style: 'flex:1; min-width:0; font-family:var(--font-mono); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', title: rule }, rule));
+  const actions = el('div', { style: 'display:flex; gap:6px; align-items:center;' });
+  PERM_LISTS.filter(l => l !== list).forEach(target => {
+    actions.appendChild(el('span', {
+      class: 'pill', style: 'cursor:pointer;',
+      title: `Move to ${target} in the same scope`,
+      onclick: () => permApi({ op: 'move', rule, from: { scope, list }, to: { scope, list: target } }, `Moved to ${target}`).catch(() => {})
+    }, `→ ${target}`));
+  });
+  const delBtn = el('span', { class: 'pill', style: 'cursor:pointer;', title: 'Delete rule', onclick: () => {
+    if (!delBtn.dataset.armed) {
+      delBtn.dataset.armed = '1';
+      delBtn.className = 'pill pink';
+      delBtn.textContent = 'confirm?';
+      setTimeout(() => { delBtn.className = 'pill'; delBtn.textContent = 'delete'; delete delBtn.dataset.armed; }, 4000);
+      return;
+    }
+    permApi({ op: 'remove', rule, list, scope }, 'Rule deleted').catch(() => {});
+  }}, 'delete');
+  actions.appendChild(delBtn);
+  row.appendChild(actions);
+  return row;
 }
 
 function renderSettings(root) {

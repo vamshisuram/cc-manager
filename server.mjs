@@ -317,10 +317,101 @@ function loadMcp() {
   return out;
 }
 
+const PERMISSION_LISTS = ['allow', 'deny', 'ask'];
+const PERMISSION_SCOPES = ['user', 'project', 'local'];
+
+function permissionSources() {
+  return [
+    { scope: 'user', path: path.join(CLAUDE_DIR, 'settings.json') },
+    { scope: 'project', path: path.join(process.cwd(), '.claude', 'settings.json') },
+    { scope: 'local', path: path.join(process.cwd(), '.claude', 'settings.local.json') }
+  ];
+}
+
 function loadPermissions() {
-  const settings = readJSON(path.join(CLAUDE_DIR, 'settings.json'));
-  const p = settings?.permissions || {};
-  return { allow: p.allow || [], deny: p.deny || [], ask: p.ask || [] };
+  const sources = permissionSources().map(s => {
+    const p = readJSON(s.path)?.permissions || {};
+    return {
+      scope: s.scope,
+      path: s.path,
+      exists: exists(s.path),
+      allow: Array.isArray(p.allow) ? p.allow : [],
+      deny: Array.isArray(p.deny) ? p.deny : [],
+      ask: Array.isArray(p.ask) ? p.ask : []
+    };
+  });
+  const merged = { allow: [], deny: [], ask: [] };
+  for (const s of sources) for (const list of PERMISSION_LISTS) merged[list].push(...s[list]);
+  return { ...merged, sources };
+}
+
+function validPermissionRule(rule) {
+  return typeof rule === 'string' && rule.length >= 1 && rule.length <= 500 && !/[\r\n\x00-\x1f]/.test(rule);
+}
+
+// Apply fn to the parsed settings file for a scope, then write it back.
+// Refuses to touch a file that exists but doesn't parse — never clobber.
+function editSettingsFile(scope, fn) {
+  const src = permissionSources().find(s => s.scope === scope);
+  if (!src) throw new Error('invalid scope');
+  let json = {};
+  if (exists(src.path)) {
+    json = readJSON(src.path);
+    if (json === null) throw new Error(`${src.path} exists but is not valid JSON — fix it by hand first`);
+  }
+  fn(json);
+  fs.mkdirSync(path.dirname(src.path), { recursive: true });
+  fs.writeFileSync(src.path, JSON.stringify(json, null, 2) + '\n');
+}
+
+function permissionAdd(json, list, rule) {
+  json.permissions = json.permissions || {};
+  const arr = (json.permissions[list] = json.permissions[list] || []);
+  if (arr.includes(rule)) throw new Error(`rule already in ${list}`);
+  arr.push(rule);
+}
+
+function permissionRemove(json, list, rule) {
+  const arr = json.permissions?.[list];
+  const i = Array.isArray(arr) ? arr.indexOf(rule) : -1;
+  if (i === -1) throw new Error(`rule not found in ${list}`);
+  arr.splice(i, 1);
+  // Leave no empty husks behind — removing the last rule removes the key
+  if (arr.length === 0) delete json.permissions[list];
+  if (Object.keys(json.permissions).length === 0) delete json.permissions;
+}
+
+function applyPermissionOp(body) {
+  const { op, rule } = body || {};
+  if (!validPermissionRule(rule)) throw new Error('invalid rule');
+  const check = (scope, list) => {
+    if (!PERMISSION_SCOPES.includes(scope)) throw new Error('invalid scope');
+    if (!PERMISSION_LISTS.includes(list)) throw new Error('invalid list');
+  };
+  if (op === 'add') {
+    check(body.scope, body.list);
+    takeSnapshot(`perm-add-${body.list}`);
+    editSettingsFile(body.scope, j => permissionAdd(j, body.list, rule));
+  } else if (op === 'remove') {
+    check(body.scope, body.list);
+    takeSnapshot(`perm-remove-${body.list}`);
+    editSettingsFile(body.scope, j => permissionRemove(j, body.list, rule));
+  } else if (op === 'move') {
+    const { from, to } = body;
+    check(from?.scope, from?.list);
+    check(to?.scope, to?.list);
+    if (from.scope === to.scope && from.list === to.list) throw new Error('source and destination are the same');
+    takeSnapshot(`perm-move-${from.list}-to-${to.list}`);
+    if (from.scope === to.scope) {
+      editSettingsFile(from.scope, j => { permissionRemove(j, from.list, rule); permissionAdd(j, to.list, rule); });
+    } else {
+      // Add to destination first so a failure never loses the rule
+      editSettingsFile(to.scope, j => permissionAdd(j, to.list, rule));
+      editSettingsFile(from.scope, j => permissionRemove(j, from.list, rule));
+    }
+  } else {
+    throw new Error('op must be add, remove, or move');
+  }
 }
 
 function loadMemory() {
@@ -726,6 +817,17 @@ const server = http.createServer((req, res) => {
       const result = await runClaudePlugin(action, plugin, scope);
       res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ...result, error: result.ok ? undefined : (result.error || result.stderr || result.stdout || `exit code ${result.code}`), snapshotId: snapshot.id }));
+    }).catch(e => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String(e.message || e) }));
+    });
+    return;
+  }
+  if (u.pathname === '/api/permissions' && req.method === 'POST') {
+    readBody(req).then(body => {
+      applyPermissionOp(body);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, permissions: loadPermissions() }));
     }).catch(e => {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: String(e.message || e) }));
