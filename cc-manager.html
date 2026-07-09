@@ -606,6 +606,16 @@
   }
   .item-row:last-child { border-bottom: none; }
   .item-row:hover { background: var(--surface-hover); }
+  /* Icon-less list row for editor/table views (permissions, snapshots, budget) */
+  .row-flex {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 0.5px solid var(--border);
+  }
+  .row-flex:last-child { border-bottom: none; }
+  .row-flex:hover { background: var(--surface-hover); }
   .item-icon {
     width: 28px; height: 28px;
     border-radius: 6px;
@@ -1558,7 +1568,7 @@ function renderPermissions(root) {
 }
 
 function permRuleRow(scope, list, rule) {
-  const row = el('div', { class: 'item-row', style: 'cursor:default; gap:10px;' });
+  const row = el('div', { class: 'row-flex' });
   row.appendChild(el('span', { class: `pill ${PERM_TONES[list]}`, style: 'min-width:44px; text-align:center;' }, list));
   row.appendChild(el('div', { style: 'flex:1; min-width:0; font-family:var(--font-mono); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', title: rule }, rule));
   const actions = el('div', { style: 'display:flex; gap:6px; align-items:center;' });
@@ -1674,7 +1684,7 @@ function renderSnapshotsSection(root) {
   } else {
     const wrap = el('div', { class: 'table-wrap' });
     snaps.slice(0, 15).forEach(s => {
-      const row = el('div', { class: 'item-row', style: 'cursor:default;' });
+      const row = el('div', { class: 'row-flex' });
       const txt = el('div', { style: 'flex:1; min-width:0;' });
       txt.appendChild(el('div', { class: 'item-name', style: 'font-family:var(--font-mono); font-size:12px;' }, s.action));
       txt.appendChild(el('div', { class: 'item-desc' }, `${new Date(s.createdAt).toLocaleString()} · ${s.fileCount} file${s.fileCount === 1 ? '' : 's'}`));
@@ -2162,7 +2172,7 @@ function renderContextBudget(root) {
   ]));
   const ownerWrap = el('div', { class: 'table-wrap' });
   cb.perPlugin.forEach(p => {
-    const row = el('div', { class: 'item-row', style: 'cursor:default; gap:12px;' });
+    const row = el('div', { class: 'row-flex' });
     const txt = el('div', { style: 'flex:1; min-width:0;' });
     txt.appendChild(el('div', { class: 'item-name', style: 'font-family:var(--font-mono); font-size:12px;' }, p.owner + (p.enabled ? '' : ' (disabled)')));
     const bar = el('div', { style: 'height:6px; background:var(--surface-2); border-radius:3px; margin-top:6px; overflow:hidden; max-width:420px;' });
@@ -2189,7 +2199,7 @@ function renderContextBudget(root) {
     ]));
     const wrap = el('div', { class: 'table-wrap' });
     g.items.slice(0, 12).forEach(i => {
-      const row = el('div', { class: 'item-row', style: 'cursor:default; gap:12px;' });
+      const row = el('div', { class: 'row-flex' });
       row.appendChild(el('div', { style: 'flex:1; min-width:0; font-family:var(--font-mono); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;' }, i.name));
       row.appendChild(el('span', { class: 'pill' }, i.owner));
       row.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:12px; min-width:56px; text-align:right;' }, '~' + fmtTokens(i.tokens)));
